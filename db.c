@@ -52,7 +52,7 @@ typedef struct {
     Row row_to_insert; // only used by insert statement
 } Statement;
 
-// row compact representation
+// this macro function gets the length of the attribute in the struct
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct*)0)->Attribute)
 const uint32_t ID_SIZE = size_of_attribute(Row, id);
 const uint32_t USERNAME_SIZE = size_of_attribute(Row, username);
@@ -78,6 +78,12 @@ typedef struct {
     Pager* pager;
     uint32_t num_rows;
 } Table;
+
+typedef struct {
+    Table* table;
+    uint32_t row_num;
+    bool end_of_table;
+} Cursor;
 
 void print_row(Row* row) {
     printf("(%d, %s, %s)\n", row->id, row->username, row->email);
@@ -176,7 +182,7 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
         printf("Error seeking: %d\n", errno);
         exit(EXIT_FAILURE);
     }
-
+    // write to a file descriptor
     ssize_t bytes_written = write(pager->file_descriptor, pager->pages[page_num], size);
 
     if (bytes_written == -1) {
@@ -311,7 +317,9 @@ void* get_page(Pager* pager, uint32_t page_num) {
         }
 
         if (page_num <= num_pages) {
+            // relocate file descriptor to the beginning of the page whose number is page_num
             lseek(pager->file_descriptor, page_num * PAGE_SIZE, SEEK_SET);
+            // read into the buffer pointed by 'page'
             ssize_t bytes_read = read(pager->file_descriptor, page, PAGE_SIZE);
             if (bytes_read == -1) {
                 printf("Error reading file: %d\n", errno);
@@ -325,13 +333,42 @@ void* get_page(Pager* pager, uint32_t page_num) {
     return pager->pages[page_num];
 }
 
-void* row_slot(Table* table, uint32_t row_num) {
+// create new cursor pointing to the start of the table
+Cursor* table_start(Table* table) {
+    Cursor* cursor = malloc(sizeof(Cursor));
+    cursor->table = table;
+    cursor->row_num = 0;
+    cursor->end_of_table = (table->num_rows == 0);
+
+    return cursor;
+}
+
+// create new cursor pointing to the end of the table
+Cursor* table_end(Table* table) {
+    Cursor* cursor = malloc(sizeof(Cursor));
+    cursor->table = table;
+    cursor->row_num = table->num_rows;
+    cursor->end_of_table = true;
+
+    return cursor;
+}
+
+// refactor 'row_slot' function to 'cursor_value', using cursor abstraction
+void* cursor_value(Cursor* cursor) {
+    uint32_t row_num = cursor->row_num;
     uint32_t page_num = row_num / ROWS_PER_PAGE;
     
-    void* page = get_page(table->pager, page_num);
+    void* page = get_page(cursor->table->pager, page_num);
     uint32_t row_offset = row_num % ROWS_PER_PAGE;
     uint32_t byte_offset = row_offset * ROW_SIZE;
     return page + byte_offset;
+}
+
+void cursor_advance(Cursor* cursor) {
+    cursor->row_num += 1;
+    if (cursor->row_num >= cursor->table->num_rows) {
+        cursor->end_of_table = true;
+    }
 }
 
 ExecuteResult execute_insert(Statement* Statement, Table* table) {
@@ -340,19 +377,28 @@ ExecuteResult execute_insert(Statement* Statement, Table* table) {
     }
 
     Row* row_to_insert = &(Statement->row_to_insert);
+    Cursor* cursor = table_end(table);
 
-    serialize_row(row_to_insert, row_slot(table, table->num_rows));
+    serialize_row(row_to_insert, cursor_value(cursor));
     table->num_rows += 1;
+
+    free(cursor);
 
     return EXECUTE_SUCCESS;
 }
 
 ExecuteResult execute_select(Statement* statement, Table* table) {
+    Cursor* cursor = table_start(table);
+
     Row row;
-    for (uint32_t i = 0; i < table->num_rows; i++) {
-        deserialize_row(row_slot(table,i), &row);
+    while (!(cursor->end_of_table)) {
+        deserialize_row(cursor_value(cursor), &row);
         print_row(&row);
+        cursor_advance(cursor);
     }
+    
+    free(cursor);
+    
     return EXECUTE_SUCCESS;
 }
 
